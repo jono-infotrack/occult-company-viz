@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Codex of Ownership</title>
+<link rel="icon" href="data:," />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400;1,500&family=IM+Fell+English+SC&family=IM+Fell+English:ital@0;1&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #f3eddf; --paper: #f7f2e6; --ink: #2b2118; --ink-soft: #6b5a45; --rule: rgba(43,33,24,.14);
+    --red: #a3281c; --blue: #34587c; --ochre: #9a6a1f; --panel-shadow: rgba(60,40,10,.18);
+  }
+  body.astral {
+    --bg: #0b0a1f; --paper: #14122e; --ink: #f2cf7a; --ink-soft: #b59a5a; --rule: rgba(242,207,122,.15);
+    --red: #ff6b57; --blue: #8fb8ff; --ochre: #ffa860; --panel-shadow: rgba(0,0,0,.5);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink);
+    font-family: "Cormorant Garamond", "IM Fell English", Georgia, serif; transition: background .6s, color .6s; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; }
+  /* paper grain + vignette */
+  #grain { position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background:
+      radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(90,60,20,.22) 100%),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .35  0 0 0 0 .25  0 0 0 0 .1  0 0 0 .55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    mix-blend-mode: multiply; opacity: .55; transition: opacity .6s; }
+  body.astral #grain { background: radial-gradient(ellipse at 50% 45%, transparent 50%, rgba(0,0,0,.55) 100%); mix-blend-mode: normal; opacity: 1; }
+
+  .ui { position: fixed; z-index: 5; }
+  #title { top: 22px; left: 28px; max-width: 460px; pointer-events: none; }
+  #title h1 { font-family: "IM Fell English SC", serif; font-weight: 400; font-size: 30px; letter-spacing: .12em; margin: 0; }
+  #title .sub { font-style: italic; font-size: 17px; color: var(--ink-soft); margin-top: 2px; }
+  #title .rule { height: 1px; background: linear-gradient(90deg, var(--ink), transparent); margin: 8px 0 6px; opacity: .5; }
+  #title .meta { font-family: "IM Fell English SC", serif; font-size: 12px; letter-spacing: .14em; color: var(--ink-soft); }
+
+  #controls { top: 22px; right: 28px; display: flex; gap: 8px; transition: right .5s cubic-bezier(.6,0,.2,1); }
+  body.panel-open #controls { right: 428px; }
+  .btn { font-family: "IM Fell English SC", serif; font-size: 13px; letter-spacing: .12em; color: var(--ink);
+    background: color-mix(in srgb, var(--paper) 85%, transparent); border: 1px solid var(--ink); padding: 7px 13px; cursor: pointer;
+    box-shadow: 2px 2px 0 var(--rule); transition: background .3s, color .3s; }
+  .btn:hover { background: var(--ink); color: var(--bg); }
+  .btn .state { font-family: "Cormorant Garamond", serif; font-style: italic; letter-spacing: .02em; opacity: .8; margin-left: 4px; }
+
+  #legend { left: 28px; bottom: 24px; padding: 12px 16px 10px; background: color-mix(in srgb, var(--paper) 80%, transparent);
+    border: 1px solid var(--rule); outline: 1px solid var(--rule); outline-offset: 3px; font-size: 14px; }
+  #legend h3 { font-family: "IM Fell English SC", serif; font-weight: 400; letter-spacing: .16em; font-size: 12px; margin: 0 0 6px; color: var(--ink-soft); }
+  #legend .grid { display: grid; grid-template-columns: repeat(2, auto); gap: 3px 22px; }
+  #legend .row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  #legend svg { flex: none; overflow: visible; }
+  #legend .hint { margin-top: 8px; font-style: italic; font-size: 13px; color: var(--ink-soft); }
+
+  #tooltip { pointer-events: none; padding: 4px 10px; font-size: 15px; font-style: italic; background: var(--paper); border: 1px solid var(--ink);
+    opacity: 0; transition: opacity .15s; white-space: nowrap; }
+
+  /* ledger panel */
+  #panel { top: 0; right: 0; bottom: 0; width: 410px; transform: translateX(105%); transition: transform .5s cubic-bezier(.6,0,.2,1);
+    background:
+      linear-gradient(90deg, transparent 0 34px, color-mix(in srgb, var(--red) 45%, transparent) 34px 35px, transparent 35px 38px, color-mix(in srgb, var(--red) 45%, transparent) 38px 39px, transparent 39px),
+      var(--paper);
+    border-left: 1px solid var(--ink); box-shadow: -10px 0 30px var(--panel-shadow); overflow-y: auto; padding: 26px 26px 40px 54px; }
+  body.panel-open #panel { transform: none; }
+  #panel .close { position: absolute; top: 14px; right: 16px; font-size: 22px; background: none; border: none; color: var(--ink); cursor: pointer; font-family: serif; }
+  #panel .kind { font-family: "IM Fell English SC", serif; letter-spacing: .2em; font-size: 12px; color: var(--ink-soft); }
+  #panel h2 { font-family: "IM Fell English", serif; font-weight: 400; font-size: 27px; line-height: 1.1; margin: 4px 0 4px; }
+  #panel h2.flagged { color: var(--red); }
+  #panel .flag { display: inline-block; font-family: "IM Fell English SC", serif; letter-spacing: .12em; font-size: 12px; color: var(--red);
+    border: 1px solid var(--red); padding: 1px 7px; margin: 2px 0 6px; transform: rotate(-1.5deg); }
+  #panel h4 { font-family: "IM Fell English SC", serif; font-weight: 400; letter-spacing: .18em; font-size: 13px; margin: 22px 0 4px;
+    border-bottom: 1px double var(--ink); padding-bottom: 2px; display: flex; justify-content: space-between; }
+  #panel h4 .n { font-family: "Cormorant Garamond", serif; font-style: italic; letter-spacing: 0; color: var(--ink-soft); }
+  /* ledger rows: each entry is ruled beneath itself, so wrapped text never drifts off a line */
+  #panel dl { display: grid; grid-template-columns: 112px 1fr; margin: 10px 0 0; font-size: 16px; line-height: 1.3; border-top: 1px solid var(--rule); }
+  #panel dt, #panel dd { margin: 0; padding: 4px 0 3px; border-bottom: 1px solid var(--rule); }
+  #panel dt { font-style: italic; color: var(--ink-soft); padding-right: 8px; }
+  #panel table { width: 100%; border-collapse: collapse; font-size: 15.5px; line-height: 1.3; }
+  #panel tr { border-bottom: 1px solid var(--rule); }
+  #panel td { padding: 5px 6px 3px 0; vertical-align: baseline; }
+  #panel td:last-child { padding-right: 0; }
+  #panel td:first-child { width: 60%; }
+  #panel td.num { text-align: right; font-variant-numeric: oldstyle-nums tabular-nums; white-space: nowrap; }
+  #panel td.cls { font-family: "IM Fell English SC", serif; font-size: 12.5px; letter-spacing: .08em; color: var(--ink-soft); white-space: nowrap; }
+  #panel tr.ceased td { opacity: .45; text-decoration: line-through; text-decoration-thickness: .5px; }
+  #panel a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--ink-soft); cursor: pointer; }
+  #panel a:hover { color: var(--red); border-color: var(--red); }
+  #panel .empty { font-style: italic; color: var(--ink-soft); font-size: 15px; line-height: 1.3; padding: 5px 0 3px; border-bottom: 1px solid var(--rule); }
+  #panel .note { font-style: italic; font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
+
+  #notice { inset: 0; display: none; align-items: center; justify-content: center; font-size: 22px; font-style: italic; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="grain"></div>
+
+<div id="title" class="ui">
+  <h1>Codex of Ownership</h1>
+  <div class="sub" id="subtitle">&nbsp;</div>
+  <div class="rule"></div>
+  <div class="meta" id="meta">&nbsp;</div>
+</div>
+
+<div id="controls" class="ui">
+  <button class="btn" id="theme-toggle">Theme<span class="state">Parchment</span></button>
+  <button class="btn" id="ceased-toggle">Former ties<span class="state">shown</span></button>
+  <button class="btn" id="rotate-toggle">Orbit<span class="state">on</span></button>
+  <button class="btn" id="reset-view">Reset</button>
+</div>
+
+<div id="legend" class="ui">
+  <h3>Key to the Seals</h3>
+  <div class="grid">
+    <div class="row"><svg width="26" height="26" viewBox="-13 -13 26 26"><circle r="12" fill="none" stroke="currentColor" stroke-width="1.2"/><circle r="9.5" fill="none" stroke="currentColor" stroke-width=".6"/><polygon points="0,-8 4.7,6.5 -7.6,-2.5 7.6,-2.5 -4.7,6.5 0,-8" fill="none" stroke="currentColor" stroke-width=".5" transform="rotate(10)"/><polygon points="0,-8 6.9,4 -6.9,4" fill="none" stroke="currentColor" stroke-width=".5" transform="rotate(30)"/><polygon points="0,-8 6.9,4 -6.9,4" fill="none" stroke="currentColor" stroke-width=".5"/></svg>Company</div>
+    <div class="row"><svg width="26" height="18"><line x1="1" y1="9" x2="22" y2="9" stroke="currentColor" stroke-width="1.2"/><polygon points="25,9 19,6 19,12" fill="currentColor"/></svg>Shareholding</div>
+    <div class="row"><svg width="26" height="26" viewBox="-13 -13 26 26"><circle r="9" fill="none" stroke="currentColor" stroke-width="1"/><polygon points="0,-7.5 4.4,6 -7.1,-2.3 7.1,-2.3 -4.4,6" fill="none" stroke="currentColor" stroke-width=".8"/></svg>Person</div>
+    <div class="row"><svg width="26" height="18"><line x1="1" y1="9" x2="25" y2="9" stroke="currentColor" stroke-width="1" stroke-dasharray="3 3"/></svg>Office held</div>
+    <div class="row"><svg width="26" height="26" viewBox="-13 -13 26 26"><circle r="12" fill="none" stroke="currentColor" stroke-width=".8" stroke-dasharray="2 2"/><circle r="9.5" fill="none" stroke="currentColor" stroke-width=".8"/><circle r="8.3" fill="none" stroke="currentColor" stroke-width=".6"/><polygon points="0,-7 6,3.5 -6,3.5" fill="none" stroke="currentColor" stroke-width=".7"/><polygon points="0,7 6,-3.5 -6,-3.5" fill="none" stroke="currentColor" stroke-width=".7"/></svg>Trust</div>
+    <div class="row"><svg width="26" height="18"><line x1="1" y1="9" x2="25" y2="9" stroke="var(--blue)" stroke-width="1.3"/></svg>Trustee</div>
+    <div class="row"><svg width="26" height="26" viewBox="-13 -13 26 26"><circle r="10" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="3 2"/><text y="5" text-anchor="middle" font-size="14" font-style="italic" fill="currentColor" font-family="IM Fell English, serif">?</text></svg>Unresolved</div>
+    <div class="row"><svg width="26" height="18"><line x1="1" y1="9" x2="25" y2="9" stroke="var(--ochre)" stroke-width="1.3"/></svg>Other trust role</div>
+    <div class="row"><svg width="26" height="26" viewBox="-13 -13 26 26"><circle r="10" fill="none" stroke="var(--red)" stroke-width="1.2"/><polygon points="0,-7.5 4.4,6 -7.1,-2.3 7.1,-2.3 -4.4,6" fill="none" stroke="var(--red)" stroke-width=".7"/></svg><span style="color:var(--red)">Flagged</span></div>
+    <div class="row"><svg width="26" height="18"><line x1="1" y1="9" x2="25" y2="9" stroke="currentColor" stroke-width="1" stroke-dasharray="1.5 3" opacity=".45"/></svg>Former / ceased</div>
+  </div>
+  <div class="hint">Above: owners. Middle: the subject. Below: subsidiaries.<br/>Hover a seal to trace it. Click to open its ledger.</div>
+</div>
+
+<div id="tooltip" class="ui"></div>
+
+<aside id="panel" class="ui"><button class="close" id="panel-close" title="Close">&times;</button><div id="panel-body"></div></aside>
+<div id="notice" class="ui">No entity data found.</div>
+
+<script src="data.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>
