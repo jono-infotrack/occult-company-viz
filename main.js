@@ -1065,6 +1065,9 @@ function applyTheme(name) {
   bloom.enabled = theme.bloom;
   stars.visible = name === 'astral';
   themeName = name;
+  const url = new URL(location.href);
+  if (name === 'parchment') url.searchParams.delete('theme'); else url.searchParams.set('theme', name);
+  history.replaceState(history.state, '', url);
 }
 document.getElementById('theme-toggle').addEventListener('click', () => applyTheme(themeName === 'astral' ? 'parchment' : 'astral'));
 document.getElementById('ceased-toggle').addEventListener('click', () => {
@@ -1188,7 +1191,8 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-applyTheme('parchment');
+const themeParam = new URLSearchParams(location.search).get('theme');
+applyTheme(themeParam && Object.hasOwn(THEMES, themeParam) ? themeParam : 'parchment');
 refreshFocus();
 animate();
 

@@ -22,7 +22,7 @@ Then open http://localhost:8765/. Add `?scratch` to the URL to use the alternati
   - Hover over a seal to trace its connections.
   - Click a seal to open a ledger panel showing its owners, holdings, officers and trust roles.
 - **Themes.** Parchment, or Astral (gold on indigo, with bloom).
-- **Seal styles.** The **Seal** button cycles Flat → Armillary → String-art → Cap-table → Hybrid in place, keeping the camera, selection and theme. `?seal=<name>` deep-links a style. See `seals/README.md`.
+- **Seal styles.** The **Seal** button cycles Flat → Armillary → String-art → Cap-table → Hybrid in place, keeping the camera, selection and theme. `?seal=<name>` deep-links a style and `?theme=astral` the theme, e.g. `?seal=hybrid&theme=astral`. See `seals/README.md`.
 
 ![Hybrid seals](screenshots/variant-hybrid.png)
 ![Hybrid seal, selected company](screenshots/variant-hybrid-selected.png)
