@@ -207,7 +207,7 @@ function ringText(ctx, text, r, fontPx) {
   });
 }
 
-function drawSealCanvas(n) {
+function drawSealCanvas(n, interior = true) {
   const S = n.isTarget ? 1536 : n.kind === 'company' || n.kind === 'trust' ? 768 : 512;
   const cv = document.createElement('canvas');
   cv.width = cv.height = S;
@@ -227,17 +227,19 @@ function drawSealCanvas(n) {
     ticks(ctx, R * 0.815, R * 0.79, 120, 10, 0.8 * u);
     circle(ctx, R * 0.775, 0.8 * u);
     for (let i = 0; i < 4; i++) { const a = i / 4 * Math.PI * 2 + Math.PI / 4; hollow(ctx, Math.cos(a) * R * 0.815, Math.sin(a) * R * 0.815, R * 0.03, 1.1 * u); }
-    if (n.isTarget) { circle(ctx, R * 0.62, 0.6 * u, [2 * u, 4 * u]); circle(ctx, R * 0.36, 0.6 * u); }
-    circle(ctx, R * 0.17, 1.4 * u);
-    circle(ctx, R * 0.14, 0.6 * u);
-    dot(ctx, 0, 0, 2.5 * u);
+    if (interior) {
+      if (n.isTarget) { circle(ctx, R * 0.62, 0.6 * u, [2 * u, 4 * u]); circle(ctx, R * 0.36, 0.6 * u); }
+      circle(ctx, R * 0.17, 1.4 * u);
+      circle(ctx, R * 0.14, 0.6 * u);
+      dot(ctx, 0, 0, 2.5 * u);
+    }
   } else if (n.kind === 'person') {
     circle(ctx, R, 2.6 * u);
     ringText(ctx, text, R * 0.88, R * 0.1);
     circle(ctx, R * 0.775, 1.4 * u);
     if (n.ubo) { circle(ctx, R * 0.75, 0.6 * u); }
     for (let i = 0; i < 5; i++) { const a = i / 5 * Math.PI * 2 - Math.PI / 2; hollow(ctx, Math.cos(a) * R * 0.775, Math.sin(a) * R * 0.775, R * 0.045, 1.2 * u); }
-    circle(ctx, R * 0.15, 1.2 * u);
+    if (interior) circle(ctx, R * 0.15, 1.2 * u);
   } else if (n.kind === 'trust') {
     circle(ctx, R, 1.4 * u, [6 * u, 5 * u]);
     circle(ctx, R * 0.94, 1.6 * u);
@@ -246,15 +248,17 @@ function drawSealCanvas(n) {
     circle(ctx, R * 0.775, 1.4 * u);
     circle(ctx, R * 0.75, 0.8 * u);
     for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2 - Math.PI / 2; dot(ctx, Math.cos(a) * R * 0.97, Math.sin(a) * R * 0.97, 3 * u); }
-    circle(ctx, R * 0.2, 1.2 * u);
+    if (interior) circle(ctx, R * 0.2, 1.2 * u);
   } else {
     circle(ctx, R * 0.97, 1.6 * u, [9 * u, 7 * u]);
     ringText(ctx, text, R * 0.86, R * 0.085);
     circle(ctx, R * 0.76, 1 * u, [3 * u, 5 * u]);
-    ctx.font = `italic ${R * 0.62}px "IM Fell English", Georgia, serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('?', 0, R * 0.04);
-    for (let i = 0; i < 3; i++) { const a = i / 3 * Math.PI * 2 + Math.PI / 2; dot(ctx, Math.cos(a) * R * 0.42, Math.sin(a) * R * 0.42, 3 * u); }
+    if (interior) {
+      ctx.font = `italic ${R * 0.62}px "IM Fell English", Georgia, serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('?', 0, R * 0.04);
+      for (let i = 0; i < 3; i++) { const a = i / 3 * Math.PI * 2 + Math.PI / 2; dot(ctx, Math.cos(a) * R * 0.42, Math.sin(a) * R * 0.42, 3 * u); }
+    }
   }
   return cv;
 }
@@ -357,6 +361,12 @@ function themedMat(role, mat) { mat.userData.role = role; themed.push(mat); retu
 let theme = THEMES.parchment;
 
 // ---------------------------------------------------------------- seals
+// Optional seal variant: ?seal=<name> loads ./seals/<name>.js, which replaces the flat
+// star webs with a 3D core. See seals/README.md for the module contract.
+const sealVariantName = new URLSearchParams(location.search).get('seal');
+const sealVariant = sealVariantName && /^[a-z0-9-]+$/.test(sealVariantName)
+  ? await import(`./seals/${sealVariantName}.js`).catch((err) => { console.error(`seal variant "${sealVariantName}" failed to load`, err); return null; })
+  : null;
 const sealRoot = new THREE.Group();
 const edgeRoot = new THREE.Group();
 scene.add(edgeRoot, sealRoot);
@@ -421,13 +431,13 @@ function buildSeal(n) {
   const mats = [];
   const reg = (m, base) => { mats.push({ m, base }); return m; };
 
-  const ringMat = reg(themedMat(role, new THREE.MeshBasicMaterial({ map: canvasTexture(drawSealCanvas(n), renderer), transparent: true, depthWrite: false })), 1);
+  const ringMat = reg(themedMat(role, new THREE.MeshBasicMaterial({ map: canvasTexture(drawSealCanvas(n, !sealVariant), renderer), transparent: true, depthWrite: false })), 1);
   const ring = new THREE.Mesh(new THREE.PlaneGeometry(n.R * 2, n.R * 2), ringMat);
   ring.userData.node = n;
   hitMeshes.push(ring);
   group.add(ring);
 
-  const webs = webLayers(n).map((L) => {
+  const webs = (sealVariant ? [] : webLayers(n)).map((L) => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(L.pts, 3));
     const mat = reg(themedMat(role, new THREE.LineBasicMaterial({ transparent: true, depthWrite: false })), L.a);
@@ -447,7 +457,21 @@ function buildSeal(n) {
   group.add(caption);
 
   sealRoot.add(group);
-  n.seal = { group, ring, webs, mats, alpha: 1, alphaT: 1, scale: 1, scaleT: 1, phase: Math.random() * 10,
+
+  // Variant core: lives in its own group so it is NOT billboarded (it is genuinely 3D).
+  let core = null;
+  if (sealVariant) {
+    const coreGroup = new THREE.Group();
+    const built = sealVariant.build(n, {
+      THREE, graph, role, R: n.R, renderer, camera,
+      reg, themedMat, canvasTexture, makeTextCanvas, starChords, hypotrochoid,
+      theme: () => theme, themeName: () => themeName,
+    });
+    coreGroup.add(built.object);
+    sealRoot.add(coreGroup);
+    core = { group: coreGroup, update: built.update || null };
+  }
+  n.seal = { group, ring, webs, mats, core, alpha: 1, alphaT: 1, scale: 1, scaleT: 1, phase: Math.random() * 10,
     spin: (Math.random() < 0.5 ? -1 : 1) * (n.isTarget ? 0.02 : 0.035 + Math.random() * 0.03) };
 }
 for (const n of graph.nodes.values()) buildSeal(n);
@@ -691,7 +715,10 @@ function layoutBounds() {
   return { r, minY, maxY };
 }
 function updateLayoutVisuals() {
-  for (const n of nodeList) n.seal.group.position.copy(n.pos);
+  for (const n of nodeList) {
+    n.seal.group.position.copy(n.pos);
+    if (n.seal.core) n.seal.core.group.position.copy(n.pos);
+  }
   for (const e of graph.edges) updateEdgeGeometry(e);
   const b = layoutBounds();
   const gy = b.minY - 10;
@@ -984,6 +1011,7 @@ function animate() {
     s.alpha += (s.alphaT - s.alpha) * fade;
     s.scale += (s.scaleT - s.scale) * fade;
     s.group.scale.setScalar(s.scale);
+    if (s.core) { s.core.group.scale.setScalar(s.scale); s.core.update?.(dt, time, s.alpha); }
     for (const { m, base } of s.mats) m.opacity = base * s.alpha * (m.isLineBasicMaterial ? theme.webAlpha : 1);
   }
   for (const e of graph.edges) {
