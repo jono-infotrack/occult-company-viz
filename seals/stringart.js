@@ -37,13 +37,21 @@ function patchDepthCue(mat, lod = { value: 1 }) {
           // The object is centred on the sphere and scaled to the shell radius.
           vec3 saC = (modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
           float saR = max(length(modelViewMatrix[0].xyz), 1e-5);
-          float saDz = dot(mvPosition.xyz - saC, -normalize(saC)) / saR;
-          vSaDepth = clamp(0.5 + 0.5 * saDz, 0.0, 1.0);
+          // normalize() of a zero vector is NaN; guard the camera-at-centre case.
+          vec3 saV = saC / max(length(saC), 1e-5);
+          vSaDepth = 0.5 - 0.5 * dot(mvPosition.xyz - saC, saV) / saR;
           vSaW = aw;
         }`);
+    // The clamps must be per fragment. A varying can leave the range of its vertex values: under
+    // MSAA (the composer target has samples: 4) a line fragment is shaded at the pixel centre, which
+    // may lie past the segment's end, so the value is extrapolated. Threads ending near a shell's far
+    // pole (depth ~0) then give a slightly negative depth. GLSL pow() is undefined for a negative
+    // base and returns NaN on desktop GPUs. With bloom on (Astral), UnrealBloomPass's blur mip chain
+    // spreads one NaN texel into a large black rectangle. SwiftShader returns pow(|x|, y), so it hides this.
     shader.fragmentShader = 'uniform float uSaFar;\nuniform float uSaPow;\nuniform float uSaGain;\nuniform float uSaLod;\nvarying float vSaDepth;\nvarying float vSaW;\n' +
       shader.fragmentShader.replace('vec4 diffuseColor = vec4( diffuse, opacity );',
-        'vec4 diffuseColor = vec4( diffuse, opacity * vSaW * uSaGain * uSaLod * mix(uSaFar, 1.0, pow(vSaDepth, uSaPow)) );');
+        `float saCue = mix(uSaFar, 1.0, pow(clamp(vSaDepth, 0.0, 1.0), uSaPow));
+        vec4 diffuseColor = vec4( diffuse, clamp(opacity * max(vSaW, 0.0) * uSaGain * uSaLod * saCue, 0.0, 1.0) );`);
   };
   mat.customProgramCacheKey = () => 'stringart-depthcue-v2';
   return mat;
