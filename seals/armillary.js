@@ -195,30 +195,125 @@ function trustParties(n) {
 }
 const holdingsCount = (n) => n.edges.filter((e) => e.kind === 'share' && e.a === n && !e.ceased).length;
 
+// Unit vector from n towards the (mean direction of the) listed parties; straight up if none.
+function towards(n, list, out, tmp) {
+  out.set(0, 0, 0);
+  for (const o of list) {
+    tmp.subVectors(o.node.pos, n.pos);
+    const l = tmp.length();
+    if (l > 1e-4) out.addScaledVector(tmp, 1 / l);
+  }
+  if (out.lengthSq() < 1e-8) out.set(0, 1, 0);
+  return out.normalize();
+}
+
+// ---------------------------------------------------------------- shared with seals/hybrid.js
+// Who controls n: owners (live shareholders, or trust parties), the controlling party or tied
+// parties, and whether that control is a majority.
+export function controlOf(n) {
+  const isTrust = n.kind === 'trust';
+  const owners = isTrust ? trustParties(n) : n.kind === 'person' || n.kind === 'unresolved' ? [] : liveOwners(n);
+  let controllers = [], ctrlPct = 0;
+  if (isTrust) {
+    controllers = owners.filter((o) => o.node && owners[0].trustee && o.trustee).slice(0, 3);
+    ctrlPct = controllers.length ? 100 : 0;
+  } else if (owners.length) {
+    ctrlPct = owners[0].pct;
+    controllers = owners.filter((o) => Math.abs(o.pct - ctrlPct) < 0.01);
+  }
+  const majority = isTrust ? controllers.length === 1 : controllers.length === 1 && ctrlPct > 50;
+  return { owners, controllers, ctrlPct, majority };
+}
+
+// Material factory: M(Ctor, role, base, opts, astralK). Every material fades its far half around a
+// sphere of radius r (keep U.centre.value at n.pos each frame). Opacity is per theme via api.reg, so
+// each element carries its own Astral weight: additive blending and bloom would otherwise blow out
+// the stacked rings. Colour and blending follow the theme via api.themedMat.
+export function armMaterials(api, n, r) {
+  const { THREE } = api;
+  const U = { centre: { value: new THREE.Vector3() }, radius: { value: r }, back: { value: 0.26 } };
+  const M = (Ctor, role, base, opts = {}, astralK = 0.75) => {
+    const m = new Ctor({ transparent: true, depthWrite: false, ...opts });
+    m.userData.armU = U;
+    m.onBeforeCompile = armBackFade;
+    const k = astralK * (n.isTarget ? 0.75 : 1);   // the target stacks many rings; keep its bloom in check
+    return api.reg(api.themedMat(n.flagged ? 'red' : role, m), { parchment: base, astral: base * k });
+  };
+  return { M, U };
+}
+
+// The polar rod along +Y of `frame`, with a finial at the controlling end (solid ball = majority,
+// open ring = largest but not a majority, or joint control) and collars where it leaves the sphere
+// of radius r. aim(dt, time) turns the frame towards the controlling party; a flagged entity's pole
+// nutates (the sphere is out of true).
+export function controlRod(api, n, ctl, M, { r, tip = r * 1.18, tail = r * 1.06, collars = true } = {}) {
+  const { THREE } = api;
+  const R = api.R;
+  const frame = new THREE.Group();
+  const ball = cached('ball', () => new THREE.SphereGeometry(1, 14, 10));
+  const torus = cached('torus', () => new THREE.TorusGeometry(1, 0.22, 6, 24));
+  const isPerson = n.kind === 'person';
+
+  frame.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -tail, 0), new THREE.Vector3(0, tip, 0)]),
+    M(THREE.LineBasicMaterial, 'ink', 0.95)));
+  const rodR = Math.max(0.03, R * 0.014);
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(rodR, rodR, tip + tail, 6, 1, true), M(THREE.MeshBasicMaterial, 'ink', 0.9));
+  rod.position.y = (tip - tail) / 2;
+  frame.add(rod);
+
+  const fr = Math.max(0.17, R * 0.072);
+  if (!isPerson || n.ubo) {
+    if (ctl.majority || isPerson) {
+      const k = new THREE.Mesh(ball, M(THREE.MeshBasicMaterial, 'ink', 1, {}, 0.9));
+      k.scale.setScalar(fr);
+      k.position.y = tip;
+      frame.add(k);
+    } else if (ctl.controllers.length) {
+      const k = new THREE.Mesh(torus, M(THREE.MeshBasicMaterial, 'ink', 1, {}, 0.9));
+      k.scale.setScalar(fr * 1.05);
+      k.rotation.x = Math.PI / 2;
+      k.position.y = tip;
+      frame.add(k);
+    }
+  }
+  if (collars) {
+    for (const y of [r, -r]) {
+      const c = new THREE.Mesh(torus, M(THREE.MeshBasicMaterial, 'ink', 0.8, {}, 0.6));
+      c.scale.setScalar(rodR * 2.4);
+      c.rotation.x = Math.PI / 2;
+      c.position.y = y;
+      frame.add(c);
+    }
+  }
+
+  const Y = new THREE.Vector3(0, 1, 0), _d = new THREE.Vector3(), _t = new THREE.Vector3();
+  const _q = new THREE.Quaternion(), _w = new THREE.Quaternion();
+  let first = true;
+  function aim(dt, time) {
+    const k = first ? 1 : 1 - Math.exp(-dt * 3);
+    first = false;
+    if (ctl.controllers.length) towards(n, ctl.controllers, _d, _t); else _d.copy(Y);
+    _q.setFromUnitVectors(Y, _d);
+    if (n.flagged) {
+      // Nutation: the pole wanders on a small cone around its true direction.
+      _t.set(Math.cos(time * 0.9), 0, Math.sin(time * 0.9));
+      _q.multiply(_w.setFromAxisAngle(_t, 0.24));
+    }
+    frame.quaternion.slerp(_q, k);
+  }
+  return { frame, aim };
+}
+
 // ---------------------------------------------------------------- build
 export function build(n, api) {
   const { THREE } = api;
   const R = api.R;
   const r = R * 0.62;                   // sphere radius; label ring interior is ~0.75 R
   const rand = rng(hashStr(n.key));
-  const flagged = !!n.flagged;
-  const roleOf = (role) => (flagged ? 'red' : role);
-  const astral = () => api.themeName() === 'astral';
 
   const root = new THREE.Group();
-  const U = { centre: { value: new THREE.Vector3() }, radius: { value: r }, back: { value: 0.26 } };
-  // Opacity is managed here rather than through api.reg, so each element can carry its own
-  // Astral weight (additive blending + bloom would otherwise blow out the stacked rings).
-  // Colour and blending still follow the theme via api.themedMat.
-  const mats = [];
-  const M = (Ctor, role, base, opts = {}, astralK = 0.75) => {
-    const m = new Ctor({ transparent: true, depthWrite: false, ...opts });
-    m.userData.armU = U;
-    m.onBeforeCompile = armBackFade;
-    api.themedMat(roleOf(role), m);
-    mats.push({ m, base, astralK: astralK * (n.isTarget ? 0.75 : 1) });   // the target stacks many rings; keep its bloom in check
-    return m;
-  };
+  const { M, U } = armMaterials(api, n, r);
 
   const unitCircle = cached('circle', () => {
     const pts = [];
@@ -231,7 +326,6 @@ export function build(n, api) {
   const bandGeo = (inner, arc = 1) => cached(`band:${inner.toFixed(3)}:${arc.toFixed(4)}`,
     () => new THREE.RingGeometry(inner, 1, Math.max(6, Math.round(128 * arc)), 1, Math.PI / 2, Math.PI * 2 * arc));
   const ball = cached('ball', () => new THREE.SphereGeometry(1, 14, 10));
-  const torus = cached('torus', () => new THREE.TorusGeometry(1, 0.22, 6, 24));
   const dotTex = cached('dotTex', () => api.canvasTexture(drawDot(32), api.renderer));
 
   // A ring: hairline loop at the outer edge (always visible, even edge-on) + optional flat band
@@ -259,61 +353,18 @@ export function build(n, api) {
 
   // ---- who controls this entity?
   const isTrust = n.kind === 'trust', isPerson = n.kind === 'person', isUnresolved = n.kind === 'unresolved';
-  const owners = isTrust ? trustParties(n) : isPerson || isUnresolved ? [] : liveOwners(n);
-  let controllers = [], ctrlPct = 0;
-  if (isTrust) {
-    controllers = owners.filter((o) => o.node && owners[0].trustee && o.trustee).slice(0, 3);
-    ctrlPct = controllers.length ? 100 : 0;
-  } else if (owners.length) {
-    ctrlPct = owners[0].pct;
-    controllers = owners.filter((o) => Math.abs(o.pct - ctrlPct) < 0.01);
-  }
-  const majority = isTrust ? controllers.length === 1 : controllers.length === 1 && ctrlPct > 50;
+  const ctl = controlOf(n);
+  const { owners, controllers } = ctl;
 
-  // ---- polar frame: local +Y is the polar axis
-  const axisFrame = new THREE.Group();
+  // ---- polar frame: local +Y is the polar axis, carrying the rod, finial and pole collars
+  const rod = isUnresolved ? null : controlRod(api, n, ctl, M, { r });
+  const axisFrame = rod ? rod.frame : new THREE.Group();
   root.add(axisFrame);
 
   const spinners = [];   // { obj, speed } rotating about their local Y
   const sign = () => (rand() < 0.5 ? -1 : 1);
 
   if (!isUnresolved) {
-    // Rod through the poles, with a finial at the controlling end.
-    const tip = r * 1.18, tail = r * 1.06;
-    const rodLine = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -tail, 0), new THREE.Vector3(0, tip, 0)]),
-      M(THREE.LineBasicMaterial, 'ink', 0.95));
-    axisFrame.add(rodLine);
-    const rodR = Math.max(0.03, R * 0.014);
-    const rod = new THREE.Mesh(new THREE.CylinderGeometry(rodR, rodR, tip + tail, 6, 1, true), M(THREE.MeshBasicMaterial, 'ink', 0.9));
-    rod.position.y = (tip - tail) / 2;
-    axisFrame.add(rod);
-
-    const fr = Math.max(0.17, R * 0.072);
-    const showFinial = !isPerson || n.ubo;
-    if (showFinial) {
-      if (majority || isPerson) {
-        const k = new THREE.Mesh(ball, M(THREE.MeshBasicMaterial, 'ink', 1, {}, 0.9));
-        k.scale.setScalar(fr);
-        k.position.y = tip;
-        axisFrame.add(k);
-      } else if (controllers.length) {
-        const k = new THREE.Mesh(torus, M(THREE.MeshBasicMaterial, 'ink', 1, {}, 0.9));
-        k.scale.setScalar(fr * 1.05);
-        k.rotation.x = Math.PI / 2;
-        k.position.y = tip;
-        axisFrame.add(k);
-      }
-    }
-    // Small collar where the rod leaves the sphere at each pole.
-    for (const y of [r * 1.0, -r * 1.0]) {
-      const c = new THREE.Mesh(torus, M(THREE.MeshBasicMaterial, 'ink', 0.8, {}, 0.6));
-      c.scale.setScalar(rodR * 2.4);
-      c.rotation.x = Math.PI / 2;
-      c.position.y = y;
-      axisFrame.add(c);
-    }
-
     // Equator (turns slowly about the polar axis), one stud per current officeholder.
     const S = n.isTarget ? 1024 : n.kind === 'company' ? 512 : 256;
     const officers = n.edges.filter((e) => e.kind === 'officer' && e.b === n && !e.ceased).length;
@@ -489,38 +540,21 @@ export function build(n, api) {
   else if (isUnresolved) root.add(core);
   else axisFrame.add(core);
 
-  // ---- per-frame
+  // ---- per-frame (opacity is set by main.js through api.reg)
   const Y = new THREE.Vector3(0, 1, 0);
   const _d = new THREE.Vector3(), _t = new THREE.Vector3(), _q = new THREE.Quaternion(), _w = new THREE.Quaternion();
   let first = true;
-  const towards = (list, out) => {
-    out.set(0, 0, 0);
-    for (const o of list) {
-      _t.subVectors(o.node.pos, n.pos);
-      const l = _t.length();
-      if (l > 1e-4) out.addScaledVector(_t, 1 / l);
-    }
-    if (out.lengthSq() < 1e-8) out.copy(Y);
-    return out.normalize();
-  };
 
-  function update(dt, time, alpha) {
+  function update(dt, time) {
     U.centre.value.copy(n.pos);
     const k = first ? 1 : 1 - Math.exp(-dt * 3);
 
     if (!isUnresolved) {
-      if (controllers.length) towards(controllers, _d); else _d.copy(Y);
-      _q.setFromUnitVectors(Y, _d);
-      if (flagged) {
-        // Nutation: the pole wanders on a small cone around its true direction.
-        _t.set(Math.cos(time * 0.9), 0, Math.sin(time * 0.9));
-        _q.multiply(_w.setFromAxisAngle(_t, 0.24));
-      }
-      axisFrame.quaternion.slerp(_q, k);
+      rod.aim(dt, time);
       for (const p of pivots) {
         if (p.isCtrl) p.pivot.quaternion.copy(axisFrame.quaternion);
         else {
-          towards([{ node: p.owner }], _d);
+          towards(n, [{ node: p.owner }], _d, _t);
           _q.setFromUnitVectors(Y, _d);
           p.pivot.quaternion.slerp(_q, k);
         }
@@ -530,9 +564,6 @@ export function build(n, api) {
     }
     for (const s of spinners) s.obj.rotation.y += s.speed * dt;
     for (const s of coreSpin) s.obj.rotation.y += s.speed * dt;
-
-    const kA = astral();
-    for (const e of mats) e.m.opacity = e.base * alpha * (kA ? e.astralK : 1);
     first = false;
   }
 

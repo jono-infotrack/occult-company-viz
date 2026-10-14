@@ -9,8 +9,7 @@
 // Everything on the surface is drawn procedurally in one fragment shader (engraved hatching with
 // screen-space level of detail, so lines stay engraving-fine at any zoom). Only the lettering
 // comes from a small equirectangular canvas. Each band rotates independently so that its largest
-// lune faces its owner, and a dotted tether carries every incoming shareholding from the arrow head
-// main.js draws onto the owner's own lune.
+// lune faces its owner, and every incoming shareholding lands on the owner's own lune (anchor()).
 //
 // Non-companies get simpler globes: persons are whole (undivided) stippled spheres, trusts are banded
 // by role (trustee / appointor / beneficiary ...), unresolved organisations are terra incognita.
@@ -262,7 +261,7 @@ function unresolvedSpec(n) {
 }
 
 // The shader holds MAXC cells. Past that, former ghosts go first, then the smallest live holders of the
-// busiest band are folded into one "others" lune (which keeps all of their tethers).
+// busiest band are folded into one "others" lune (on which all of their edges land).
 function capCells(spec) {
   const total = () => spec.bands.reduce((a, b) => a + b.cells.length, 0);
   for (const b of spec.bands) if (total() > MAXC) b.cells = b.cells.filter((c) => !c.former);
@@ -357,7 +356,7 @@ float fwc(float a, float b) { return abs(a * gX.x + b * gY.x) + abs(a * gX.y + b
 // derivative, so converging lines (near the poles) drop out two-to-one instead of greying over.
 float lod(float v, float fw, float w, float k) {
   float s0 = uS0 * k;
-  float lv = clamp(log2(4.0 * fw / s0), -3.0, 12.0);
+  float lv = clamp(log2(max(4.0 * fw / s0, 1e-6)), -3.0, 12.0);
   float i0 = floor(lv), t = lv - i0;
   float S1 = s0 * exp2(i0), S2 = 2.0 * S1;
   return max(hl(v / S2, fw / S2, w), hl(v / S1, fw / S1, w) * (1.0 - t));
@@ -404,15 +403,16 @@ float stipPat(int p, float L, float S, float sinT, float pw) {
 void main() {
   vec3 n = normalize(vObj);
   vec3 dnx = dFdx(n), dny = dFdy(n);
-  float pw = uR * max(length(dnx), length(dny));          // world units per pixel
+  // Guards (here and below): pow/log2 of a base <= 0 and 0/0 are NaN on real GPUs, and bloom spreads a NaN texel.
+  float pw = max(uR * max(length(dnx), length(dny)), 1e-6);   // world units per pixel
   float s2 = max(n.x * n.x + n.z * n.z, 1e-8);
   float sinT = sqrt(s2);
   float theta = acos(clamp(n.y, -1.0, 1.0));
   float lon = atan(n.z, n.x);
   vec2 dLon = vec2(n.x * dnx.z - n.z * dnx.x, n.x * dny.z - n.z * dny.x) / s2;
   vec2 dTh = -vec2(dnx.y, dny.y) / sinT;
-  float fwL = abs(dLon.x) + abs(dLon.y);
-  float fwT = abs(dTh.x) + abs(dTh.y);
+  float fwL = max(abs(dLon.x) + abs(dLon.y), 1e-6);
+  float fwT = max(abs(dTh.x) + abs(dTh.y), 1e-6);
   gX = dLon * uR; gY = dTh * uR;
 
   // band
@@ -441,7 +441,7 @@ void main() {
   float inCap = step(theta, uCap) + step(PI - uCap, theta);
 
   // ---- hatching, with level of detail so line spacing stays ~4-9 px at any zoom
-  float lv = clamp(log2(4.0 * pw / uS0), -3.0, 9.0);
+  float lv = clamp(log2(max(4.0 * pw / uS0, 1e-6)), -3.0, 9.0);
   float i0 = floor(lv), t = lv - i0;
   float S1 = uS0 * exp2(i0), S2 = S1 * 2.0;
   int p = int(CA.z + 0.5);
@@ -525,13 +525,18 @@ void main() {
   col = mix(col, uSoft, tx.g);
   col = mix(col, uInk, tx.r);
   col = mix(col, uInk, rim);
-  col += uInk * pow(1.0 - ndv, 3.0) * 0.18 * uAstral;
+  col += uInk * pow(clamp(1.0 - ndv, 0.0, 1.0), 3.0) * 0.18 * uAstral;
   gl_FragColor = vec4(col, uAlpha);
   #include <fog_fragment>
 }`;
 
 // ------------------------------------------------------------------ build
-export function build(n, api) {
+export function build(n, api) { return buildGlobe(n, api); }
+
+// opts.face: 'owners' (default) turns each band so its largest lune faces that holder; 'camera'
+//            turns it towards the viewer instead (seals/hybrid.js).
+// opts.axis: false leaves out the polar axis line (when the host draws its own).
+export function buildGlobe(n, api, opts = {}) {
   const { THREE } = api;
   const R = api.R;
   const r = R * CORE;
@@ -708,7 +713,7 @@ export function build(n, api) {
 
   // ---- polar axis with small finials
   const lineMat = (base, roleName = role) => api.reg(api.themedMat(roleName, new THREE.LineBasicMaterial({ transparent: true, depthWrite: false })), base);
-  {
+  if (opts.axis !== false) {
     const a = r * 1.13, f = r * 0.05;
     const pts = [0, -a, 0, 0, a, 0, -f, a, 0, f, a, 0, -f, -a, 0, f, -a, 0];
     const g = new THREE.BufferGeometry();
@@ -716,57 +721,59 @@ export function build(n, api) {
     tiltGroup.add(new THREE.LineSegments(g, lineMat(0.75)));
   }
 
-  // ---- tethers: carry each incoming relationship from main.js's arrow head onto the owner's cell
-  const edgeRole = (e) => (e.a.flagged || e.b.flagged ? 'red' : e.kind === 'trust' ? (e.trustee ? 'blue' : 'ochre') : 'ink');
-  const dotTex = (() => {
-    const c = document.createElement('canvas'); c.width = c.height = 64;
-    const g = c.getContext('2d');
-    g.fillStyle = '#fff'; g.beginPath(); g.arc(32, 32, 13, 0, TAU); g.fill();
-    g.strokeStyle = '#fff'; g.lineWidth = 5; g.beginPath(); g.arc(32, 32, 26, 0, TAU); g.stroke();
-    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
-  })();
-  const TSEG = 40;
-  const tethers = [];
+  // ---- edge anchors: each live incoming relationship lands on its owner's cell (a multi-class
+  // holder on its largest cell; members of an "others" lune on that lune). main.js asks anchor().
+  const cellOf = new Map();
+  const cellArea = (c) => c.angle * (Math.cos(spec.bands[c.band].c0) - Math.cos(spec.bands[c.band].c1));
   for (const band of spec.bands) {
-    for (const c of band.cells) for (const edge of c.others ? c.members.map((m) => m.edge) : [c.edge]) {
-      if (!edge || c.former) continue;
-      const prior = tethers.find((t) => t.edge === edge);
-      if (prior) { // multi-class holder: tether to its largest cell only
-        if (c.angle * (band.c1 - band.c0) > prior.cell.angle * (spec.bands[prior.cell.band].c1 - spec.bands[prior.cell.band].c0)) prior.cell = c;
-        continue;
+    for (const c of band.cells) {
+      if (c.former) continue;
+      for (const edge of c.others ? c.members.map((m) => m.edge) : [c.edge]) {
+        if (edge && (!cellOf.has(edge) || cellArea(c) > cellArea(cellOf.get(edge)))) cellOf.set(edge, c);
       }
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array((TSEG + 1) * 3), 3));
-      const m = api.reg(api.themedMat(edgeRole(edge), new THREE.LineDashedMaterial({ dashSize: 0.08 + r * 0.014, gapSize: 0.06 + r * 0.01, transparent: true, depthWrite: false })), 1);
-      const line = new THREE.Line(g, m);
-      line.frustumCulled = false;
-      const pg = new THREE.BufferGeometry();
-      pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
-      const pm = api.reg(api.themedMat(edgeRole(edge), new THREE.PointsMaterial({ map: dotTex, size: 0.28 + r * 0.05, transparent: true, depthWrite: false, alphaTest: 0.05 })), 0.95);
-      const pin = new THREE.Points(pg, pm);
-      pin.frustumCulled = false;
-      object.add(line, pin);
-      tethers.push({ edge, cell: c, line, pin });
     }
   }
 
-  const _t = new THREE.Vector3(), _tan = new THREE.Vector3(), _a = new THREE.Vector3(), _p = new THREE.Vector3(), _d = new THREE.Vector3();
+  const _t = new THREE.Vector3(), _d = new THREE.Vector3();
   const sph = (th, lon, out) => out.set(Math.sin(th) * Math.cos(lon), Math.cos(th), Math.sin(th) * Math.sin(lon));
-  function tipLocal(e, out) {
-    const v = e.vis;
-    if (!v || !v.curve) return null;
-    v.curve.getPoint(v.t1, out);
-    v.curve.getTangent(v.t1, _tan);
-    out.addScaledVector(_tan, 0.55).sub(n.pos);
-    const sc = object.parent ? object.parent.scale.x || 1 : 1;
-    return out.divideScalar(sc);
-  }
-  // World azimuth (atan2(z, x)) of where an edge arrives.
+  // Azimuth (atan2(z, x), in the globe's untilted frame) of the direction an edge arrives from.
   function arrivalAz(e) {
-    if (!tipLocal(e, _t)) return null;
+    if (!api.approach(e, _t)) return null;
     _t.applyQuaternion(qTiltInv);
     if (Math.hypot(_t.x, _t.z) < 1e-4) return null;
     return Math.atan2(_t.z, _t.x);
+  }
+
+  // The point of e's cell nearest to where e arrives from, kept clear of the cell's walls and the
+  // band's rules: an offset from the seal centre in world axes and units (see seals/README.md).
+  function anchor(e, out) {
+    const c = cellOf.get(e);
+    if (!c || !api.approach(e, _d)) return false;
+    const band = spec.bands[c.band];
+    const off = band.offset || 0;
+    _d.applyQuaternion(qTiltInv);
+    let th = Math.acos(clamp(_d.y, -1, 1));
+    let L = wrap(Math.atan2(_d.z, _d.x) - off);
+    const mT = Math.min(0.16, (band.c1 - band.c0) * 0.3);
+    th = clamp(th, band.c0 + mT + (band.c0 < 0.01 ? CAP : 0), band.c1 - mT - (band.c1 > Math.PI - 0.01 ? CAP : 0));
+    if (c.l1 - c.l0 < TAU - 1e-3) {
+      const mL = Math.min(0.08, (c.l1 - c.l0) * 0.3);
+      const a0 = c.l0 + mL, a1 = c.l1 - mL;
+      if (!(L >= a0 && L <= a1)) L = Math.abs(angDiff(L, a0)) < Math.abs(angDiff(L, a1)) ? a0 : a1;
+    }
+    sph(th, L + off, out).applyQuaternion(qTilt).multiplyScalar(r * 1.01);
+    return true;
+  }
+
+  // Camera-facing mode: turn each band so its largest live lune faces the viewer.
+  function faceCamera() {
+    _t.subVectors(api.camera.position, n.pos).applyQuaternion(qTiltInv);
+    if (Math.hypot(_t.x, _t.z) < 1e-4) return;
+    const camAz = Math.atan2(_t.z, _t.x);
+    for (const band of spec.bands) {
+      const lead = band.cells.filter((c) => !c.former && !c.unknown).sort((a, b) => b.angle - a.angle)[0] || band.cells[0];
+      if (lead) band.offsetT = camAz - (lead.l0 + lead.l1) / 2;
+    }
   }
 
   // ---- orientation: order cells by where their owners are, then turn each band so its largest
@@ -806,49 +813,6 @@ export function build(n, api) {
     if (changed || nsig !== sig || force) { sig = nsig; pushCells(); drawLabels(); }
   }
 
-  function updateTethers(alpha) {
-    for (const t of tethers) {
-      const e = t.edge;
-      const show = alpha > 0.02 && e.vis && e.vis.line.visible;
-      t.line.visible = t.pin.visible = !!show;
-      if (!show || !tipLocal(e, _t)) continue;
-      const band = spec.bands[t.cell.band];
-      const off = band.offset || 0;
-      const c = t.cell;
-      _d.copy(_t).normalize().applyQuaternion(qTiltInv);
-      let th = Math.acos(clamp(_d.y, -1, 1));
-      let L = wrap(Math.atan2(_d.z, _d.x) - off);
-      const mT = Math.min(0.16, (band.c1 - band.c0) * 0.3);
-      th = clamp(th, band.c0 + mT + (band.c0 < 0.01 ? CAP : 0), band.c1 - mT - (band.c1 > Math.PI - 0.01 ? CAP : 0));
-      if (c.l1 - c.l0 < TAU - 1e-3) {
-        const mL = Math.min(0.08, (c.l1 - c.l0) * 0.3);
-        const a0 = c.l0 + mL, a1 = c.l1 - mL;
-        if (!(L >= a0 && L <= a1)) L = Math.abs(angDiff(L, a0)) < Math.abs(angDiff(L, a1)) ? a0 : a1;
-      }
-      sph(th, L + off, _a).applyQuaternion(qTilt);
-      const rA = r * 1.015, rT = _t.length();
-      _d.copy(_t).divideScalar(rT);
-      const omega = Math.acos(clamp(_d.dot(_a), -1, 1));
-      const arr = t.line.geometry.attributes.position.array;
-      for (let i = 0; i <= TSEG; i++) {
-        const u = i / TSEG;
-        if (omega < 1e-4 || omega > Math.PI - 1e-3) _p.copy(_d).lerp(_a, u).normalize();
-        else {
-          const s = Math.sin(omega);
-          _p.copy(_d).multiplyScalar(Math.sin((1 - u) * omega) / s).addScaledVector(_a, Math.sin(u * omega) / s);
-        }
-        const k = 1 - Math.min(1, u / 0.55);
-        _p.multiplyScalar(rA + (rT - rA) * k * k * (3 - 2 * k));
-        arr[i * 3] = _p.x; arr[i * 3 + 1] = _p.y; arr[i * 3 + 2] = _p.z;
-      }
-      t.line.geometry.attributes.position.needsUpdate = true;
-      t.line.computeLineDistances();
-      const pa = t.pin.geometry.attributes.position.array;
-      pa[0] = _a.x * rA; pa[1] = _a.y * rA; pa[2] = _a.z * rA;
-      t.pin.geometry.attributes.position.needsUpdate = true;
-    }
-  }
-
   // ---- theme
   let lastTheme = null;
   function applyTheme() {
@@ -882,16 +846,18 @@ export function build(n, api) {
       uniforms.uAlpha.value = alpha;
       mat.depthWrite = alpha > 0.55;
       acc += dt;
-      if (first || acc > 0.4) { reorder(first); acc = 0; first = false; }
+      if (first || acc > 0.4) { reorder(first); acc = 0; }
+      if (opts.face === 'camera') faceCamera();
       let moved = false;
       for (const band of spec.bands) {
         if (band.offsetT == null) continue;
-        if (band.offset == null) band.offset = band.offsetT;
+        if (band.offset == null || first) { band.offset = band.offsetT; moved = true; }
         const d = angDiff(band.offsetT, band.offset);
         if (Math.abs(d) > 1e-4) { band.offset += d * Math.min(1, dt * 3); moved = true; }
       }
       if (moved) spec.bands.forEach((b, i) => uniforms.uBands.value[i].z = b.offset || 0);
-      updateTethers(alpha);
+      first = false;
     },
+    anchor,
   };
 }

@@ -356,17 +356,60 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 // Theme-aware material registry: every material declares an ink "role".
-const themed = [];
-function themedMat(role, mat) { mat.userData.role = role; themed.push(mat); return mat; }
+const themed = new Set();
 let theme = THEMES.parchment;
+let themeName = 'parchment';
+function themedMat(role, mat) {
+  mat.userData.role = role;
+  themed.add(mat);
+  // Materials made after start-up (seal swaps, lazily built cores) join the current theme straight away.
+  if (mat.color) mat.color.setHex(theme[role]);
+  mat.blending = theme.blending;
+  return mat;
+}
+
+// Free the GPU resources under `root` (geometries, materials and their textures, including shader
+// uniforms) and drop its materials from the theme registry and from `mats` (a seal's fade registry).
+function disposeObject(root, mats = null) {
+  const gone = new Set();
+  root.traverse((o) => {
+    o.geometry?.dispose();
+    for (const m of [o.material].flat()) if (m) gone.add(m);
+  });
+  for (const m of gone) {
+    for (const v of Object.values(m)) if (v?.isTexture) v.dispose();
+    for (const u of Object.values(m.uniforms || {})) if (u?.value?.isTexture) u.value.dispose();
+    m.dispose();
+    themed.delete(m);
+  }
+  if (mats) for (let i = mats.length - 1; i >= 0; i--) if (gone.has(mats[i].m)) mats.splice(i, 1);
+  root.removeFromParent();
+}
+
+let hovered = null, selected = null, showCeased = true;
 
 // ---------------------------------------------------------------- seals
-// Optional seal variant: ?seal=<name> loads ./seals/<name>.js, which replaces the flat
-// star webs with a 3D core. See seals/README.md for the module contract.
-const sealVariantName = new URLSearchParams(location.search).get('seal');
-const sealVariant = sealVariantName && /^[a-z0-9-]+$/.test(sealVariantName)
-  ? await import(`./seals/${sealVariantName}.js`).catch((err) => { console.error(`seal variant "${sealVariantName}" failed to load`, err); return null; })
-  : null;
+// Seal variant: ?seal=<name>, or the Seal toolbar button, loads ./seals/<name>.js, which replaces the
+// flat star webs with a 3D core. See seals/README.md for the module contract.
+const SEAL_MODES = [
+  { name: null, label: 'Flat' },
+  { name: 'armillary', label: 'Armillary' },
+  { name: 'stringart', label: 'String-art' },
+  { name: 'captable', label: 'Cap-table' },
+  { name: 'hybrid', label: 'Hybrid' },
+];
+async function loadSealVariant(name) {
+  if (!name || !/^[a-z0-9-]+$/.test(name)) return null;
+  try {
+    const mod = await import(`./seals/${name}.js`);
+    if (typeof mod.build === 'function') return mod;
+    console.error(`seal variant "${name}" has no build() export`);
+  } catch (err) { console.error(`seal variant "${name}" failed to load`, err); }
+  return null;
+}
+let sealVariantName = new URLSearchParams(location.search).get('seal');
+let sealVariant = await loadSealVariant(sealVariantName);
+if (!sealVariant) sealVariantName = null;
 const sealRoot = new THREE.Group();
 const edgeRoot = new THREE.Group();
 scene.add(edgeRoot, sealRoot);
@@ -424,12 +467,18 @@ function webLayers(n) {
   return [{ pts: starChords(7, 3, R * 0.6), a: 0.25, speed: 0.05 }];
 }
 
+// Builds (or, on a seal-mode swap, rebuilds) n's seal. The previous seal's fade, hover scale and
+// spin carry over so a swap is seamless.
 function buildSeal(n) {
+  const prev = n.seal;
   n.R = radiusFor(n);
   const role = n.flagged ? 'red' : 'ink';
   const group = new THREE.Group();     // positioned; billboarded toward camera
+  group.position.copy(n.pos);
   const mats = [];
-  const reg = (m, base) => { mats.push({ m, base }); return m; };
+  // base: a number (line materials also take the theme's webAlpha) or { parchment, astral } (used
+  // as given). gain: optional { value } that also multiplies the opacity, read every frame.
+  const reg = (m, base, gain = null) => { mats.push({ m, base, gain }); return m; };
 
   const ringMat = reg(themedMat(role, new THREE.MeshBasicMaterial({ map: canvasTexture(drawSealCanvas(n, !sealVariant), renderer), transparent: true, depthWrite: false })), 1);
   const ring = new THREE.Mesh(new THREE.PlaneGeometry(n.R * 2, n.R * 2), ringMat);
@@ -462,19 +511,68 @@ function buildSeal(n) {
   let core = null;
   if (sealVariant) {
     const coreGroup = new THREE.Group();
+    coreGroup.position.copy(n.pos);
     const built = sealVariant.build(n, {
       THREE, graph, role, R: n.R, renderer, camera,
       reg, themedMat, canvasTexture, makeTextCanvas, starChords, hypotrochoid,
       theme: () => theme, themeName: () => themeName,
+      hovered: () => hovered, selected: () => selected,
+      approach: (e, out) => edgeApproach(e, n, out),
+      dispose: (obj) => disposeObject(obj, mats),
     });
     coreGroup.add(built.object);
     sealRoot.add(coreGroup);
-    core = { group: coreGroup, update: built.update || null };
+    core = { group: coreGroup, update: built.update || null, anchor: built.anchor || null, dispose: built.dispose || null };
   }
-  n.seal = { group, ring, webs, mats, core, alpha: 1, alphaT: 1, scale: 1, scaleT: 1, phase: Math.random() * 10,
-    spin: (Math.random() < 0.5 ? -1 : 1) * (n.isTarget ? 0.02 : 0.035 + Math.random() * 0.03) };
+  n.seal = { group, ring, webs, mats, core, state: { hovered: false, selected: false },
+    alpha: prev?.alpha ?? 1, alphaT: prev?.alphaT ?? 1, scale: prev?.scale ?? 1, scaleT: prev?.scaleT ?? 1,
+    phase: prev?.phase ?? Math.random() * 10,
+    spin: prev?.spin ?? (Math.random() < 0.5 ? -1 : 1) * (n.isTarget ? 0.02 : 0.035 + Math.random() * 0.03) };
+  if (prev) ring.rotation.z = prev.ring.rotation.z;
+  group.scale.setScalar(n.seal.scale);
+  core?.group.scale.setScalar(n.seal.scale);
 }
 for (const n of graph.nodes.values()) buildSeal(n);
+
+function disposeSeal(n) {
+  const s = n.seal;
+  if (s.core) { s.core.dispose?.(); disposeObject(s.core.group); }
+  disposeObject(s.group);
+  hitMeshes.splice(hitMeshes.indexOf(s.ring), 1);
+}
+
+// Swap every seal to the current variant in place: camera, selection, theme and toggles are untouched.
+function rebuildSeals() {
+  for (const n of graph.nodes.values()) { disposeSeal(n); buildSeal(n); }
+  refreshAnchored();
+  for (const e of graph.edges) updateEdgeGeometry(e);
+  refreshFocus();
+}
+
+let sealSeq = 0;
+async function setSealMode(name) {
+  const seq = ++sealSeq;
+  const mod = await loadSealVariant(name);
+  if (seq !== sealSeq) return false;     // superseded by a later click
+  sealVariant = mod;
+  sealVariantName = mod ? name : null;
+  rebuildSeals();
+  showSealMode();
+  const url = new URL(location.href);
+  if (sealVariantName) url.searchParams.set('seal', sealVariantName); else url.searchParams.delete('seal');
+  history.replaceState(history.state, '', url);
+  return true;
+}
+const sealLabel = (name) => SEAL_MODES.find((m) => m.name === name)?.label || name || 'Flat';
+function showSealMode(name = sealVariantName) { document.querySelector('#seal-toggle .state').textContent = sealLabel(name); }
+let sealRequested = sealVariantName;
+document.getElementById('seal-toggle').addEventListener('click', () => {
+  const i = SEAL_MODES.findIndex((m) => m.name === sealRequested);
+  sealRequested = SEAL_MODES[(i + 1) % SEAL_MODES.length].name;
+  showSealMode(sealRequested);
+  setSealMode(sealRequested);
+});
+showSealMode();
 
 // Selection halo: a dashed ring that orbits the selected seal.
 const halo = (() => {
@@ -562,8 +660,32 @@ function buildEdge(e) {
 graph.edges.forEach(buildEdge);
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0), Y = new THREE.Vector3(0, 1, 0);
+const _ancA = new THREE.Vector3(), _ancB = new THREE.Vector3();
+
+// Unit vector (world axes) from n's centre towards where edge e comes in from: the curve's control
+// point, which depends only on the two node centres (so anchoring an end never feeds back into it).
+function edgeApproach(e, n, out) {
+  if (!e.vis || (e.a !== n && e.b !== n)) return false;
+  out.subVectors(e.vis.curve.v1, n.pos);
+  const l = out.length();
+  if (l < 1e-6) return false;
+  out.divideScalar(l);
+  return true;
+}
+// A variant core may land an edge end on a point of its own (seals/README.md, anchor()).
+function coreAnchor(n, e, out) {
+  const c = n.seal.core;
+  if (!c?.anchor || !c.anchor(e, out)) return false;
+  out.multiplyScalar(n.seal.scale).add(n.pos);
+  return true;
+}
+// Edges with an anchor-capable end are re-laid every frame (cores turn after the layout settles).
+let anchoredEdges = [];
+function refreshAnchored() { anchoredEdges = graph.edges.filter((e) => e.a.seal.core?.anchor || e.b.seal.core?.anchor); }
+refreshAnchored();
+
 function updateEdgeGeometry(e) {
-  const { curve, line } = e.vis;
+  const { curve } = e.vis;
   const A = e.a.pos, B = e.b.pos;
   const dir = _v.subVectors(B, A);
   const len = Math.max(dir.length(), 0.001);
@@ -573,10 +695,20 @@ function updateEdgeGeometry(e) {
   side.normalize();
   const i = e.pairIndex;
   const bend = (0.1 + 0.12 * Math.ceil(i / 2)) * (i % 2 ? -1 : 1) * len;
-  curve.v0.copy(A); curve.v2.copy(B);
   curve.v1.copy(A).add(B).multiplyScalar(0.5).addScaledVector(side, bend).addScaledVector(UP, len * 0.04);
+  layEdge(e, coreAnchor(e.a, e, _ancA) && _ancA, coreAnchor(e.b, e, _ancB) && _ancB);
+}
+// Ends: anchor points (world) or false, meaning the node centre, trimmed to just outside its seal.
+function layEdge(e, ancA, ancB) {
+  const { curve, line } = e.vis;
+  curve.v0.copy(ancA || e.a.pos);
+  curve.v2.copy(ancB || e.b.pos);
+  e.vis.anchored = !!(ancA || ancB);
+  curve.needsUpdate = true; // Curve caches its arc lengths; the end points have moved
   const L = curve.getLength();
-  const t0 = Math.min(0.45, (e.a.R * 1.04) / L), t1 = Math.max(0.55, 1 - (e.b.R * 1.04 + (e.kind === 'share' ? 0.4 : 0)) / L);
+  // An anchored share edge stops so that its arrow's tip (0.55 beyond its centre) touches the anchor.
+  const endB = ancB ? (e.kind === 'share' ? 0.6 : 0.1) : e.b.R * 1.04 + (e.kind === 'share' ? 0.4 : 0);
+  const t0 = Math.min(0.45, (ancA ? 0.1 : e.a.R * 1.04) / L), t1 = Math.max(0.55, 1 - endB / L);
   e.vis.t0 = t0; e.vis.t1 = t1;
   const arr = line.geometry.attributes.position.array;
   for (let s = 0; s <= SEG; s++) {
@@ -774,7 +906,6 @@ function flyToNode(n) {
 const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 // ---------------------------------------------------------------- focus / hover / selection
-let hovered = null, selected = null, showCeased = true;
 const edgeVisible = (e) => showCeased || !e.ceased;
 function refreshFocus() {
   const focus = hovered || selected;
@@ -935,7 +1066,6 @@ function applyTheme(name) {
   stars.visible = name === 'astral';
   themeName = name;
 }
-let themeName = 'parchment';
 document.getElementById('theme-toggle').addEventListener('click', () => applyTheme(themeName === 'astral' ? 'parchment' : 'astral'));
 document.getElementById('ceased-toggle').addEventListener('click', () => {
   showCeased = !showCeased;
@@ -979,7 +1109,8 @@ function animate() {
   const dt = Math.min(rawDt, 0.05);
   const time = clock.elapsedTime;
 
-  if (simAlpha > 0.002) {
+  const simmed = simAlpha > 0.002;
+  if (simmed) {
     const steps = Math.max(1, Math.min(8, Math.round(rawDt * 60)));
     for (let i = 0; i < steps; i++) simTick();
     updateLayoutVisuals();
@@ -1011,8 +1142,22 @@ function animate() {
     s.alpha += (s.alphaT - s.alpha) * fade;
     s.scale += (s.scaleT - s.scale) * fade;
     s.group.scale.setScalar(s.scale);
-    if (s.core) { s.core.group.scale.setScalar(s.scale); s.core.update?.(dt, time, s.alpha); }
-    for (const { m, base } of s.mats) m.opacity = base * s.alpha * (m.isLineBasicMaterial ? theme.webAlpha : 1);
+    if (s.core) {
+      s.core.group.scale.setScalar(s.scale);
+      s.state.hovered = n === hovered; s.state.selected = n === selected;
+      s.core.update?.(dt, time, s.alpha, s.state);
+    }
+    for (const { m, base, gain } of s.mats) {
+      const b = typeof base === 'number' ? base * (m.isLineBasicMaterial ? theme.webAlpha : 1) : base[themeName] ?? 1;
+      m.opacity = b * s.alpha * (gain ? gain.value : 1);
+    }
+  }
+  // Anchored edge ends follow their cores (the layout pass above already re-laid every edge while it runs).
+  if (!simmed) {
+    for (const e of anchoredEdges) {
+      const a = coreAnchor(e.a, e, _ancA), b = coreAnchor(e.b, e, _ancB);
+      if (a || b || e.vis.anchored) layEdge(e, a && _ancA, b && _ancB);
+    }
   }
   for (const e of graph.edges) {
     const v = e.vis;
@@ -1051,7 +1196,12 @@ animate();
 window.__viz = {
   data: DATA, graph, camera,
   selectByKey: (k) => graph.nodes.has(k) && select(graph.nodes.get(k)),
+  selectedKey: () => selected?.key ?? null,
   setTheme: applyTheme,
+  setSeal: (name) => { sealRequested = name || null; return setSealMode(sealRequested); },
+  seal: () => sealVariantName,
+  memory: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length ?? 0, themed: themed.size,
+    regMats: nodeList.reduce((a, n) => a + n.seal.mats.length, 0), hitMeshes: hitMeshes.length, sealRoot: sealRoot.children.length }),
   screenPosOf: (k) => {
     const n = graph.nodes.get(k);
     if (!n) return null;
